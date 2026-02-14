@@ -3,7 +3,18 @@
 #include QMK_KEYBOARD_H
 #include "transactions.h"
 #include "lib/lib8tion/lib8tion.h"
-#include <stdio.h>
+// Manual number formatting (avoids pulling in snprintf/stdio on AVR)
+static void put_u8(char *buf, uint8_t val) {
+    buf[0] = (val >= 100) ? '0' + val / 100 : ' ';
+    buf[1] = (val >= 10)  ? '0' + (val / 10) % 10 : ' ';
+    buf[2] = '0' + val % 10;
+    buf[3] = '\0';
+}
+static void put_02u(char *buf, uint8_t val) {
+    buf[0] = '0' + val / 10;
+    buf[1] = '0' + val % 10;
+    buf[2] = '\0';
+}
 
 // ── Layers ──────────────────────────────────────────────
 enum sofle_layers {
@@ -78,6 +89,7 @@ typedef struct {
     uint8_t  recent_count;
     uint8_t  recent_leds[MAX_RECENT_KEYS];
     uint8_t  recent_fades[MAX_RECENT_KEYS];  // 0=just pressed, 255=expired
+    uint8_t  wpm;
 } timer_sync_t;
 
 static timer_sync_t synced_timer = {0};
@@ -105,7 +117,7 @@ const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
   _______,   KC_F1,   KC_F2,   KC_F3,   KC_F4,   KC_F5,                       KC_F6,   KC_F7,   KC_F8,   KC_F9,  KC_F10,  KC_F11,
   KC_GRV,    KC_1,    KC_2,    KC_3,    KC_4,    KC_5,                       KC_6,    KC_7,    KC_8,    KC_9,    KC_0,  KC_F12,
   _______, KC_EXLM,   KC_AT, KC_HASH,  KC_DLR, KC_PERC,                       KC_CIRC, KC_AMPR, KC_ASTR, KC_LPRN, KC_RPRN, KC_PIPE,
-  _______,  KC_EQL, KC_MINS, KC_PLUS, KC_LCBR, KC_RCBR, _______,       TMR_BTN, KC_LBRC, KC_RBRC, KC_SCLN, KC_COLN, KC_BSLS, _______,
+  _______,  KC_EQL, KC_MINS, KC_PLUS, KC_LCBR, KC_RCBR, _______,       TMR_BTN, KC_LBRC, KC_RBRC, KC_NUBS, S(KC_NUBS), KC_BSLS, _______,
                        _______, _______, _______, _______, _______,       _______, _______, _______, _______, _______
 ),
 
@@ -120,7 +132,7 @@ const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
   // ADJUST: LOWER + RAISE
   [_ADJUST] = LAYOUT(
   XXXXXXX , XXXXXXX,  XXXXXXX ,  XXXXXXX , XXXXXXX, XXXXXXX,                     XXXXXXX, XXXXXXX, XXXXXXX, XXXXXXX, XXXXXXX, XXXXXXX,
-  QK_BOOT  , XXXXXXX,KC_QWERTY,KC_COLEMAK,CG_TOGG,XXXXXXX,                     XXXXXXX, XXXXXXX, XXXXXXX, XXXXXXX, XXXXXXX, XXXXXXX,
+  QK_BOOT  , XXXXXXX,KC_QWERTY,KC_COLEMAK,XXXXXXX,XXXXXXX,                     XXXXXXX, XXXXXXX, XXXXXXX, XXXXXXX, XXXXXXX, XXXXXXX,
   XXXXXXX , XXXXXXX,CG_TOGG, XXXXXXX,    XXXXXXX,  XXXXXXX,                     XXXXXXX, KC_VOLD, TMR_SET, KC_VOLU, XXXXXXX, XXXXXXX,
   XXXXXXX , XXXXXXX, XXXXXXX, XXXXXXX,    XXXXXXX,  XXXXXXX, XXXXXXX,   TMR_BTN, XXXXXXX, KC_MPRV, KC_MPLY, KC_MNXT, XXXXXXX, XXXXXXX,
                    _______, _______, _______, _______, _______,     _______, _______, _______, _______, _______
@@ -190,6 +202,7 @@ void housekeeping_task_user(void) {
             .remaining_ms = get_remaining(),
             .target_ms    = timer_target_ms,
             .recent_count = recent_key_count,
+            .wpm          = get_current_wpm(),
         };
         for (uint8_t i = 0; i < recent_key_count; i++) {
             payload.recent_leds[i] = recent_keys[i].led;
@@ -414,69 +427,88 @@ oled_rotation_t oled_init_user(oled_rotation_t rotation) {
     return rotation;  // left side: keep board default
 }
 
-static void render_timer(void) {
+static void render_status(void) {
     // Blink OLED when alarm (toggle every 500ms)
     oled_invert(synced_timer.alarm && (timer_read() % 1000 < 500));
 
-    char buf[16];
+    char buf[6];
 
-    // Show target time when in set mode, remaining when running/paused
+
+    oled_write_ln_P(PSTR("-----"), false);
+    oled_write_ln_P(PSTR("Timer"), false);
+    // ── Timer ──
     uint32_t ms;
     if (synced_timer.set_mode) {
         ms = synced_timer.target_ms;
     } else {
         ms = synced_timer.remaining_ms;
     }
-    uint32_t secs  = ms / 1000;
-    uint32_t mins  = secs / 60;
-    uint32_t hours = mins / 60;
-    secs %= 60;
-    mins %= 60;
-
-    oled_write_ln_P(PSTR(""), false);
-    oled_write_ln_P(PSTR("T"), false);
-    oled_write_ln_P(PSTR(""), false);
+    uint32_t total_s = ms / 1000;
+    uint8_t secs  = total_s % 60;
+    uint8_t mins  = (total_s / 60) % 60;
+    uint8_t hours = total_s / 3600;
 
     if (hours > 0) {
-        snprintf(buf, sizeof(buf), "%lu:%02lu:%02lu", (unsigned long)hours, (unsigned long)mins, (unsigned long)secs);
+        put_u8(buf, hours);
+        // trim leading spaces, append ':'
+        char *p = buf; while (*p == ' ') p++;
+        oled_write(p, false);
+        oled_write_P(PSTR(":"), false);
+        put_02u(buf, mins);
+        oled_write_ln(buf, false);
+        buf[0] = ' '; buf[1] = ' '; buf[2] = ':';
+        put_02u(buf + 3, secs);
+        oled_write_ln(buf, false);
     } else {
-        snprintf(buf, sizeof(buf), "%02lu:%02lu", (unsigned long)mins, (unsigned long)secs);
+        put_02u(buf, mins);
+        buf[2] = ':';
+        put_02u(buf + 3, secs);
+        oled_write_ln(buf, false);
     }
-    oled_write_ln(buf, false);
 
-    oled_write_ln_P(PSTR(""), false);
+
+    // ── Status indicator ──
     if (synced_timer.alarm) {
-        oled_write_ln_P(PSTR("  !"), false);
+        oled_write_ln_P(PSTR("ALARM"), false);
     } else if (synced_timer.running) {
-        oled_write_ln_P(PSTR("  R"), false);
+        oled_write_ln_P(PSTR(" RUN"), false);
     } else if (synced_timer.set_mode) {
         oled_write_ln_P(PSTR(" SET"), false);
     } else if (synced_timer.target_ms > 0) {
-        oled_write_ln_P(PSTR("  S"), false);
+        oled_write_ln_P(PSTR("PAUSE"), false);
     } else {
         oled_write_ln_P(PSTR("  -"), false);
     }
+    oled_write_ln_P(PSTR("-----"), false);
+    // ── WPM ──
+    oled_write_ln_P(PSTR(" WPM "), false);
+    put_u8(buf, synced_timer.wpm);
+    oled_write_ln(buf, false);
+
+    oled_write_ln_P(PSTR("-----"), false);
 }
 
 bool oled_task_user(void) {
 #if LED_TEST_MODE
     if (is_keyboard_master()) {
-        char buf[16];
+        char buf[6];
         oled_write_ln_P(PSTR(""), false);
         oled_write_ln_P(PSTR("LED"), false);
         oled_write_ln_P(PSTR("TEST"), false);
         oled_write_ln_P(PSTR(""), false);
-        snprintf(buf, sizeof(buf), "# %d", test_led_index);
+        oled_write_P(PSTR("# "), false);
+        put_u8(buf, test_led_index);
         oled_write_ln(buf, false);
         oled_write_ln_P(PSTR(""), false);
-        snprintf(buf, sizeof(buf), "/%d", RGB_MATRIX_LED_COUNT);
+        oled_write_P(PSTR("/"), false);
+        put_u8(buf, RGB_MATRIX_LED_COUNT);
         oled_write_ln(buf, false);
         return false;
     }
 #endif
     if (!is_keyboard_master()) {
-        // Slave (right): show timer, skip kb-level logo
-        render_timer();
+        // Slave (right): show status, skip kb-level logo
+        render_status();
         return false;
     }
     // Master (left): let sofle.c render status as usual
