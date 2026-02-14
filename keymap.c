@@ -448,6 +448,32 @@ static void render_status(void) {
     oled_write_ln_P(PSTR("-----"), false);
 }
 
+static void render_master_status(void) {
+    oled_write_P(PSTR("\n\n"), false);
+    oled_write_ln_P(PSTR("Qwrt"), false);
+    oled_write_P(PSTR("\n\n"), false);
+    oled_write_ln_P(PSTR("LAYER"), false);
+    switch (get_highest_layer(layer_state)) {
+        case _QWERTY:
+            oled_write_P(PSTR("Base\n"), false);
+            break;
+        case _LOWER:
+            oled_write_P(PSTR("Lower"), false);
+            break;
+        case _RAISE:
+            oled_write_P(PSTR("Raise"), false);
+            break;
+        case _ADJUST:
+            oled_write_P(PSTR("Adjst"), false);
+            break;
+        default:
+            oled_write_ln_P(PSTR("Undef"), false);
+    }
+    oled_write_P(PSTR("\n\n"), false);
+    led_t led_usb_state = host_keyboard_led_state();
+    oled_write_ln_P(PSTR("CPSLK"), led_usb_state.caps_lock);
+}
+
 bool oled_task_user(void) {
 #if LED_TEST_MODE
     if (is_keyboard_master()) {
@@ -466,13 +492,12 @@ bool oled_task_user(void) {
         return false;
     }
 #endif
-    if (!is_keyboard_master()) {
-        // Slave (right): show status, skip kb-level logo
+    if (is_keyboard_master()) {
+        render_master_status();
+    } else {
         render_status();
-        return false;
     }
-    // Master (left): let sofle.c render status as usual
-    return true;
+    return false;
 }
 
 #endif
